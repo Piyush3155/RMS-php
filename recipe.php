@@ -57,15 +57,19 @@ if (!empty($where_conditions)) {
 $recipes_query = "SELECT r.*, m.name, m.category, m.price, m.image FROM recipes r JOIN menu m ON r.menu_id = m.id $where_clause ORDER BY m.name ASC";
 if (!empty($params)) {
     $stmt = $conn->prepare($recipes_query);
-    $stmt->bind_param($param_types, ...$params);
-    $stmt->execute();
-    $recipes = $stmt->get_result();
+    if ($stmt) {
+        $stmt->bind_param($param_types, ...$params);
+        $stmt->execute();
+        $recipes = $stmt->get_result();
+    } else {
+        $recipes = false;
+    }
 } else {
     $recipes = $conn->query($recipes_query);
 }
 
 // Get statistics and menu items
-$stats = $conn->query("
+$stats_result = $conn->query("
     SELECT 
         COUNT(*) as total_recipes,
         AVG(cooking_time) as avg_cooking_time,
@@ -73,7 +77,14 @@ $stats = $conn->query("
         COUNT(CASE WHEN difficulty_level = 'medium' THEN 1 END) as medium_recipes,
         COUNT(CASE WHEN difficulty_level = 'hard' THEN 1 END) as hard_recipes
     FROM recipes r JOIN menu m ON r.menu_id = m.id $where_clause
-")->fetch_assoc();
+");
+$stats = $stats_result ? $stats_result->fetch_assoc() : [
+    'total_recipes' => 0,
+    'avg_cooking_time' => 0,
+    'easy_recipes' => 0,
+    'medium_recipes' => 0,
+    'hard_recipes' => 0
+];
 
 $menu_items = $conn->query("SELECT id, name, category FROM menu ORDER BY name");
 $categories = $conn->query("SELECT DISTINCT category FROM menu ORDER BY category");
@@ -191,7 +202,7 @@ $categories = $conn->query("SELECT DISTINCT category FROM menu ORDER BY category
 
             <!-- Recipes Grid -->
             <div class="row">
-                <?php if ($recipes->num_rows > 0): ?>
+                <?php if ($recipes && $recipes->num_rows > 0): ?>
                     <?php while($row = $recipes->fetch_assoc()): ?>
                         <div class="col-lg-6 col-xl-4">
                             <div class="recipe-card">

@@ -55,22 +55,31 @@ if (!empty($where_conditions)) {
 $shifts_query = "SELECT s.*, u.name, u.role FROM shifts s JOIN users u ON s.staff_id = u.id $where_clause ORDER BY shift_date DESC, start_time ASC";
 if (!empty($params)) {
     $stmt = $conn->prepare($shifts_query);
-    $stmt->bind_param($param_types, ...$params);
-    $stmt->execute();
-    $shifts = $stmt->get_result();
+    if ($stmt) {
+        $stmt->bind_param($param_types, ...$params);
+        $stmt->execute();
+        $shifts = $stmt->get_result();
+    } else {
+        $shifts = false;
+    }
 } else {
     $shifts = $conn->query($shifts_query);
 }
 
 // Get staff list and statistics
 $staff_list = $conn->query("SELECT id, name, role FROM users WHERE role IN ('waiter','chef','cashier','manager') ORDER BY name");
-$stats = $conn->query("
+$stats_result = $conn->query("
     SELECT 
         COUNT(*) as total_shifts,
         SUM(CASE WHEN attendance = 1 THEN 1 ELSE 0 END) as present_count,
         SUM(CASE WHEN attendance = 0 AND shift_date <= CURDATE() THEN 1 ELSE 0 END) as absent_count
     FROM shifts s $where_clause
-")->fetch_assoc();
+");
+$stats = $stats_result ? $stats_result->fetch_assoc() : [
+    'total_shifts' => 0,
+    'present_count' => 0,
+    'absent_count' => 0
+];
 ?>
 
 <style>
@@ -168,7 +177,7 @@ $stats = $conn->query("
 
             <!-- Shifts Display -->
             <div class="row">
-                <?php if ($shifts->num_rows > 0): ?>
+                <?php if ($shifts && $shifts->num_rows > 0): ?>
                     <?php while($row = $shifts->fetch_assoc()): ?>
                         <?php
                         $status_class = '';

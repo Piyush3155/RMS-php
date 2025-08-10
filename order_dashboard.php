@@ -14,18 +14,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $stmt->execute();
     }
     
-    if (isset($_POST['assign_staff'])) {
+    if (isset($_POST['assign_waiter'])) {
         $order_id = $_POST['order_id'];
-        $staff_id = $_POST['staff_id'];
+        $waiter_id = $_POST['waiter_id'];
         
-        $stmt = $conn->prepare("UPDATE orders SET assigned_staff = ? WHERE id = ?");
-        $stmt->bind_param("ii", $staff_id, $order_id);
+        $stmt = $conn->prepare("UPDATE orders SET assigned_waiter = ? WHERE id = ?");
+        $stmt->bind_param("ii", $waiter_id, $order_id);
         $stmt->execute();
     }
 }
 
+// Get filter parameters
 $type = $_GET['type'] ?? 'dine-in';
 $status_filter = $_GET['status'] ?? 'all';
+$date_filter = $_GET['date'] ?? date('Y-m-d');
 
 // Build query with filters
 $where_conditions = ["o.order_type = ?"];
@@ -38,48 +40,43 @@ if ($status_filter && $status_filter !== 'all') {
     $param_types .= 's';
 }
 
+if ($date_filter) {
+    $where_conditions[] = "DATE(o.created_at) = ?";
+    $params[] = $date_filter;
+    $param_types .= 's';
+}
+
 $where_clause = 'WHERE ' . implode(' AND ', $where_conditions);
 
-$orders_query = "
-    SELECT o.*, u.name as staff_name, 
-           COUNT(oi.id) as item_count,
-           GROUP_CONCAT(CONCAT(m.name, ' (', oi.quantity, ')') SEPARATOR ', ') as items
-    FROM orders o 
-    LEFT JOIN users u ON o.assigned_staff = u.id 
-    LEFT JOIN order_items oi ON o.id = oi.order_id
-    LEFT JOIN menu m ON oi.menu_id = m.id
-    $where_clause 
-    GROUP BY o.id 
-    ORDER BY 
-        CASE 
-            WHEN o.status = 'pending' THEN 1
-            WHEN o.status = 'preparing' THEN 2
-            WHEN o.status = 'ready' THEN 3
-            ELSE 4
-        END,
-        o.created_at DESC
-";
+$orders_query = "SELECT o.*, u.name as customer_name, w.name as waiter_name FROM orders o 
+                 LEFT JOIN users u ON o.user_id = u.id 
+                 LEFT JOIN users w ON o.assigned_waiter = w.id 
+                 $where_clause ORDER BY o.created_at DESC";
 
 $stmt = $conn->prepare($orders_query);
-$stmt->bind_param($param_types, ...$params);
-$stmt->execute();
-$orders = $stmt->get_result();
+if ($stmt) {
+    $stmt->bind_param($param_types, ...$params);
+    $stmt->execute();
+    $orders = $stmt->get_result();
+} else {
+    $orders = false;
+}
 
 // Get statistics
 $stats = $conn->query("
     SELECT 
         COUNT(*) as total_orders,
-        COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_orders,
-        COUNT(CASE WHEN status = 'preparing' THEN 1 END) as preparing_orders,
-        COUNT(CASE WHEN status = 'ready' THEN 1 END) as ready_orders,
-        COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_orders,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_orders,
+        SUM(CASE WHEN status = 'preparing' THEN 1 ELSE 0 END) as preparing_orders,
+        SUM(CASE WHEN status = 'ready' THEN 1 ELSE 0 END) as ready_orders,
+        SUM(CASE WHEN status = 'served' THEN 1 ELSE 0 END) as served_orders,
+        AVG(total) as avg_order_value,
         SUM(total) as total_revenue
-    FROM orders 
-    WHERE order_type = '$type' AND DATE(created_at) = CURDATE()
+    FROM orders o $where_clause
 ")->fetch_assoc();
 
-// Get staff list
-$staff_list = $conn->query("SELECT id, name FROM users WHERE role IN ('waiter', 'chef') ORDER BY name");
+// Get available waiters
+$waiters = $conn->query("SELECT id, name FROM users WHERE role = 'waiter' ORDER BY name");
 ?>
 
 <style>
@@ -90,241 +87,234 @@ $staff_list = $conn->query("SELECT id, name FROM users WHERE role IN ('waiter', 
 .status-pending { border-left: 5px solid #ed8936; background: #fffaf0; }
 .status-preparing { border-left: 5px solid #3182ce; background: #ebf8ff; }
 .status-ready { border-left: 5px solid #38a169; background: #f0fff4; }
-.status-completed { border-left: 5px solid #718096; background: #f7fafc; }
+.status-served { border-left: 5px solid #805ad5; background: #faf5ff; }
 .status-cancelled { border-left: 5px solid #e53e3e; background: #fed7d7; }
-.order-header { padding: 20px; border-bottom: 1px solid #e2e8f0; }
+.order-header { background: linear-gradient(135deg, #2d3748, #4a5568); color: white; padding: 15px; }
 .order-details { padding: 20px; }
-.order-id { font-family: 'Courier New', monospace; font-weight: 700; font-size: 1.1rem; color: #667eea; }
-.table-badge { background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 6px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; }
-.time-badge { background: #4a5568; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8rem; }
-.priority-high { border-left-color: #e53e3e !important; }
-.priority-medium { border-left-color: #ed8936 !important; }
-.priority-low { border-left-color: #38a169 !important; }
-.customer-info { background: #f7fafc; padding: 12px; border-radius: 8px; margin-bottom: 15px; }
-.order-items { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
-.item-list { font-size: 0.9rem; line-height: 1.6; }
-.total-amount { font-size: 1.3rem; font-weight: 700; color: #38a169; }
-.action-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
-.status-btn { padding: 6px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600; border: none; }
-.btn-pending { background: #fed7d7; color: #742a2a; }
-.btn-preparing { background: #bee3f8; color: #2c5282; }
-.btn-ready { background: #c6f6d5; color: #22543d; }
-.btn-completed { background: #e2e8f0; color: #4a5568; }
-.timer-display { background: #fff3cd; color: #856404; padding: 8px 12px; border-radius: 20px; font-weight: 600; font-size: 0.85rem; }
-.staff-assign { background: #e6fffa; padding: 10px; border-radius: 8px; margin-top: 10px; }
+.order-id { font-size: 1.2rem; font-weight: 700; color: #2d3748; }
+.order-total { font-size: 1.3rem; font-weight: 700; color: #38a169; }
+.table-badge { background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 6px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; }
+.time-badge { background: #4a5568; color: white; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; }
+.order-items { background: #f7fafc; padding: 15px; border-radius: 12px; margin: 10px 0; max-height: 150px; overflow-y: auto; }
+.waiter-badge { background: #e6fffa; color: #00695c; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; }
+.priority-high { border-top: 4px solid #e53e3e; }
+.priority-medium { border-top: 4px solid #ed8936; }
+.priority-normal { border-top: 4px solid #38a169; }
 </style>
 
 <div class="container-fluid mt-4">
     <div class="row">
         <div class="col-12">
             <div class="d-flex justify-content-between align-items-center mb-4">
-                <h2 class="fw-bold text-dark"><i class="fas fa-clipboard-list me-2 text-primary"></i>Order Management</h2>
+                <h2 class="fw-bold text-dark"><i class="fas fa-clipboard-list me-2 text-primary"></i>Order Dashboard</h2>
                 <div class="d-flex gap-2">
-                    <button class="btn btn-outline-success" onclick="refreshOrders()">
-                        <i class="fas fa-sync-alt me-2"></i>Refresh
-                    </button>
-                    <button class="btn btn-outline-primary" onclick="exportOrders()">
+                    <button class="btn btn-outline-success" onclick="exportOrders()">
                         <i class="fas fa-download me-2"></i>Export
                     </button>
-                    <button class="btn btn-primary" onclick="printKitchenTickets()">
-                        <i class="fas fa-print me-2"></i>Kitchen Tickets
+                    <button class="btn btn-success" onclick="refreshOrders()" id="refreshBtn">
+                        <i class="fas fa-sync-alt me-2"></i>Refresh
                     </button>
                 </div>
             </div>
+
+            <!-- Order Type Tabs -->
+            <ul class="nav nav-pills mb-4 justify-content-center">
+                <li class="nav-item">
+                    <a class="nav-link <?= $type=='dine-in'?'active':'' ?>" href="?type=dine-in">
+                        <i class="fas fa-utensils me-2"></i>Dine-in
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link <?= $type=='takeaway'?'active':'' ?>" href="?type=takeaway">
+                        <i class="fas fa-shopping-bag me-2"></i>Takeaway
+                    </a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link <?= $type=='delivery'?'active':'' ?>" href="?type=delivery">
+                        <i class="fas fa-motorcycle me-2"></i>Delivery
+                    </a>
+                </li>
+            </ul>
 
             <!-- Statistics Cards -->
             <div class="row mb-4">
-                <div class="col-md-2">
+                <div class="col-lg-2 col-md-4 col-sm-6">
                     <div class="order-stats text-center">
                         <h4 class="mb-0"><?= $stats['total_orders'] ?></h4>
-                        <p class="mb-0 opacity-75 small">Total Today</p>
+                        <small class="opacity-75">Total Orders</small>
                     </div>
                 </div>
-                <div class="col-md-2">
+                <div class="col-lg-2 col-md-4 col-sm-6">
                     <div class="order-stats text-center">
                         <h4 class="mb-0 text-warning"><?= $stats['pending_orders'] ?></h4>
-                        <p class="mb-0 opacity-75 small">Pending</p>
+                        <small class="opacity-75">Pending</small>
                     </div>
                 </div>
-                <div class="col-md-2">
+                <div class="col-lg-2 col-md-4 col-sm-6">
                     <div class="order-stats text-center">
                         <h4 class="mb-0 text-primary"><?= $stats['preparing_orders'] ?></h4>
-                        <p class="mb-0 opacity-75 small">Preparing</p>
+                        <small class="opacity-75">Preparing</small>
                     </div>
                 </div>
-                <div class="col-md-2">
+                <div class="col-lg-2 col-md-4 col-sm-6">
                     <div class="order-stats text-center">
                         <h4 class="mb-0 text-success"><?= $stats['ready_orders'] ?></h4>
-                        <p class="mb-0 opacity-75 small">Ready</p>
+                        <small class="opacity-75">Ready</small>
                     </div>
                 </div>
-                <div class="col-md-2">
+                <div class="col-lg-2 col-md-4 col-sm-6">
                     <div class="order-stats text-center">
-                        <h4 class="mb-0 text-secondary"><?= $stats['completed_orders'] ?></h4>
-                        <p class="mb-0 opacity-75 small">Completed</p>
+                        <h4 class="mb-0 text-info"><?= $stats['served_orders'] ?></h4>
+                        <small class="opacity-75">Served</small>
                     </div>
                 </div>
-                <div class="col-md-2">
+                <div class="col-lg-2 col-md-4 col-sm-6">
                     <div class="order-stats text-center">
                         <h4 class="mb-0">₹<?= number_format($stats['total_revenue'] ?? 0, 0) ?></h4>
-                        <p class="mb-0 opacity-75 small">Revenue</p>
+                        <small class="opacity-75">Revenue</small>
                     </div>
                 </div>
             </div>
 
-            <!-- Order Type Tabs and Filters -->
+            <!-- Filters -->
             <div class="card filter-card">
-                <div class="row g-3 align-items-center">
-                    <div class="col-md-4">
-                        <ul class="nav nav-pills mb-0">
-                            <li class="nav-item">
-                                <a class="nav-link <?= $type=='dine-in'?'active':'' ?>" href="?type=dine-in">
-                                    <i class="fas fa-utensils me-2"></i>Dine-in
-                                </a>
-                            </li>
-                            <li class="nav-item">
-                                <a class="nav-link <?= $type=='takeaway'?'active':'' ?>" href="?type=takeaway">
-                                    <i class="fas fa-shopping-bag me-2"></i>Takeaway
-                                </a>
-                            </li>
-                            <li class="nav-item">
-                                <a class="nav-link <?= $type=='delivery'?'active':'' ?>" href="?type=delivery">
-                                    <i class="fas fa-truck me-2"></i>Delivery
-                                </a>
-                            </li>
-                        </ul>
-                    </div>
+                <form method="GET" class="row g-3">
+                    <input type="hidden" name="type" value="<?= $type ?>">
                     <div class="col-md-3">
-                        <select class="form-select" onchange="filterByStatus(this.value)">
+                        <label class="form-label fw-semibold">Filter by Status</label>
+                        <select name="status" class="form-select">
                             <option value="all" <?= $status_filter === 'all' ? 'selected' : '' ?>>All Status</option>
                             <option value="pending" <?= $status_filter === 'pending' ? 'selected' : '' ?>>Pending</option>
                             <option value="preparing" <?= $status_filter === 'preparing' ? 'selected' : '' ?>>Preparing</option>
                             <option value="ready" <?= $status_filter === 'ready' ? 'selected' : '' ?>>Ready</option>
-                            <option value="completed" <?= $status_filter === 'completed' ? 'selected' : '' ?>>Completed</option>
+                            <option value="served" <?= $status_filter === 'served' ? 'selected' : '' ?>>Served</option>
+                            <option value="cancelled" <?= $status_filter === 'cancelled' ? 'selected' : '' ?>>Cancelled</option>
                         </select>
                     </div>
                     <div class="col-md-3">
-                        <div class="form-check form-switch">
-                            <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
-                            <label class="form-check-label" for="autoRefresh">Auto-refresh</label>
-                        </div>
+                        <label class="form-label fw-semibold">Filter by Date</label>
+                        <input type="date" name="date" class="form-control" value="<?= htmlspecialchars($date_filter) ?>">
                     </div>
-                </div>
+                    <div class="col-md-3 d-flex align-items-end">
+                        <button type="submit" class="btn btn-primary me-2"><i class="fas fa-search me-2"></i>Filter</button>
+                        <a href="order_dashboard.php?type=<?= $type ?>" class="btn btn-outline-secondary">Clear</a>
+                    </div>
+                </form>
             </div>
 
             <!-- Orders Grid -->
-            <div class="row">
-                <?php if ($orders->num_rows > 0): ?>
+            <div class="row" id="ordersContainer">
+                <?php if ($orders && $orders->num_rows > 0): ?>
                     <?php while($row = $orders->fetch_assoc()): ?>
                         <?php
-                        // Calculate order age and priority
-                        $order_time = new DateTime($row['created_at']);
-                        $now = new DateTime();
-                        $age_minutes = $now->diff($order_time)->i + ($now->diff($order_time)->h * 60);
-                        
-                        $priority_class = '';
-                        if ($age_minutes > 30) $priority_class = 'priority-high';
-                        elseif ($age_minutes > 15) $priority_class = 'priority-medium';
-                        else $priority_class = 'priority-low';
+                        // Calculate priority based on time elapsed
+                        $created_time = strtotime($row['created_at']);
+                        $elapsed_minutes = (time() - $created_time) / 60;
+                        $priority_class = 'priority-normal';
+                        if ($elapsed_minutes > 30) $priority_class = 'priority-high';
+                        elseif ($elapsed_minutes > 15) $priority_class = 'priority-medium';
                         ?>
                         <div class="col-lg-6 col-xl-4">
                             <div class="order-card status-<?= $row['status'] ?> <?= $priority_class ?>">
-                                <div class="order-header">
-                                    <div class="d-flex justify-content-between align-items-start mb-2">
+                                <div class="order-details">
+                                    <div class="d-flex justify-content-between align-items-start mb-3">
                                         <div>
-                                            <div class="order-id">#<?= str_pad($row['id'], 4, '0', STR_PAD_LEFT) ?></div>
-                                            <div class="d-flex gap-2 align-items-center mt-1">
-                                                <?php if ($row['table_no']): ?>
-                                                    <span class="table-badge">
-                                                        <i class="fas fa-table me-1"></i>Table <?= $row['table_no'] ?>
-                                                    </span>
-                                                <?php endif; ?>
-                                                <span class="time-badge">
-                                                    <i class="fas fa-clock me-1"></i><?= $age_minutes ?>min ago
+                                            <div class="order-id">Order #<?= $row['id'] ?></div>
+                                            <small class="text-muted">
+                                                <?= date('M d, Y - g:i A', strtotime($row['created_at'])) ?>
+                                                <span class="ms-2 time-badge">
+                                                    <?= round($elapsed_minutes) ?> min ago
                                                 </span>
-                                            </div>
+                                            </small>
                                         </div>
-                                        <span class="badge bg-<?= $row['status'] === 'pending' ? 'warning' : ($row['status'] === 'preparing' ? 'primary' : ($row['status'] === 'ready' ? 'success' : 'secondary')) ?>">
+                                        <span class="badge bg-<?= $row['status'] === 'pending' ? 'warning' : ($row['status'] === 'preparing' ? 'primary' : ($row['status'] === 'ready' ? 'success' : ($row['status'] === 'served' ? 'info' : 'danger'))) ?>">
                                             <?= ucfirst($row['status']) ?>
                                         </span>
                                     </div>
-                                </div>
-                                
-                                <div class="order-details">
-                                    <?php if ($row['customer_name'] || $row['customer_phone']): ?>
-                                        <div class="customer-info">
-                                            <div class="fw-semibold">
-                                                <i class="fas fa-user me-2"></i><?= htmlspecialchars($row['customer_name'] ?: 'Walk-in Customer') ?>
-                                            </div>
-                                            <?php if ($row['customer_phone']): ?>
-                                                <div class="text-muted small">
-                                                    <i class="fas fa-phone me-2"></i><?= htmlspecialchars($row['customer_phone']) ?>
-                                                </div>
-                                            <?php endif; ?>
-                                        </div>
-                                    <?php endif; ?>
                                     
-                                    <div class="order-items">
-                                        <div class="fw-semibold mb-2">
-                                            <i class="fas fa-utensils me-2"></i>Order Items (<?= $row['item_count'] ?>)
+                                    <div class="row g-2 mb-3">
+                                        <div class="col-6">
+                                            <div class="d-flex align-items-center">
+                                                <i class="fas fa-user text-primary me-2"></i>
+                                                <span class="fw-semibold">
+                                                    <?= htmlspecialchars($row['customer_name'] ?? 'Walk-in Customer') ?>
+                                                </span>
+                                            </div>
                                         </div>
-                                        <div class="item-list"><?= htmlspecialchars($row['items']) ?></div>
+                                        <?php if ($type === 'dine-in' && $row['table_no']): ?>
+                                            <div class="col-6">
+                                                <div class="table-badge text-center">
+                                                    <i class="fas fa-table me-1"></i>Table <?= $row['table_no'] ?>
+                                                </div>
+                                            </div>
+                                        <?php endif; ?>
                                     </div>
                                     
                                     <div class="d-flex justify-content-between align-items-center mb-3">
-                                        <div class="total-amount">₹<?= number_format($row['total'], 2) ?></div>
-                                        <div class="timer-display" id="timer-<?= $row['id'] ?>">
-                                            <i class="fas fa-stopwatch me-1"></i>
-                                            <span class="timer-minutes"><?= $age_minutes ?></span>m
-                                        </div>
+                                        <div class="order-total">₹<?= number_format($row['total'], 2) ?></div>
+                                        <?php if ($row['waiter_name']): ?>
+                                            <div class="waiter-badge">
+                                                <i class="fas fa-user-tie me-1"></i><?= htmlspecialchars($row['waiter_name']) ?>
+                                            </div>
+                                        <?php endif; ?>
                                     </div>
                                     
-                                    <?php if ($row['staff_name']): ?>
-                                        <div class="staff-assign">
-                                            <i class="fas fa-user-tie me-2"></i>
-                                            <strong>Assigned to:</strong> <?= htmlspecialchars($row['staff_name']) ?>
-                                        </div>
-                                    <?php endif; ?>
+                                    <!-- Order Items -->
+                                    <div class="order-items">
+                                        <h6 class="fw-bold mb-2"><i class="fas fa-list me-2"></i>Items:</h6>
+                                        <?php
+                                        $items_query = $conn->prepare("SELECT oi.*, m.name FROM order_items oi JOIN menu m ON oi.menu_id = m.id WHERE oi.order_id = ?");
+                                        $items_query->bind_param("i", $row['id']);
+                                        $items_query->execute();
+                                        $items = $items_query->get_result();
+                                        ?>
+                                        <ul class="mb-0 small">
+                                            <?php while($item = $items->fetch_assoc()): ?>
+                                                <li><?= $item['quantity'] ?>x <?= htmlspecialchars($item['name']) ?></li>
+                                            <?php endwhile; ?>
+                                        </ul>
+                                    </div>
                                     
-                                    <div class="action-buttons mt-3">
+                                    <!-- Action Buttons -->
+                                    <div class="mt-3 d-flex gap-2 flex-wrap">
                                         <?php if ($row['status'] === 'pending'): ?>
-                                            <form method="POST" style="display: inline;">
+                                            <form method="POST" style="flex: 1;">
                                                 <input type="hidden" name="order_id" value="<?= $row['id'] ?>">
                                                 <input type="hidden" name="status" value="preparing">
-                                                <button type="submit" name="update_status" class="btn btn-primary btn-sm">
+                                                <button type="submit" name="update_status" class="btn btn-sm btn-primary w-100">
                                                     <i class="fas fa-play"></i> Start Preparing
                                                 </button>
                                             </form>
                                         <?php elseif ($row['status'] === 'preparing'): ?>
-                                            <form method="POST" style="display: inline;">
+                                            <form method="POST" style="flex: 1;">
                                                 <input type="hidden" name="order_id" value="<?= $row['id'] ?>">
                                                 <input type="hidden" name="status" value="ready">
-                                                <button type="submit" name="update_status" class="btn btn-success btn-sm">
+                                                <button type="submit" name="update_status" class="btn btn-sm btn-success w-100">
                                                     <i class="fas fa-check"></i> Mark Ready
                                                 </button>
                                             </form>
                                         <?php elseif ($row['status'] === 'ready'): ?>
-                                            <form method="POST" style="display: inline;">
+                                            <form method="POST" style="flex: 1;">
                                                 <input type="hidden" name="order_id" value="<?= $row['id'] ?>">
-                                                <input type="hidden" name="status" value="completed">
-                                                <button type="submit" name="update_status" class="btn btn-outline-success btn-sm">
-                                                    <i class="fas fa-handshake"></i> Complete
+                                                <input type="hidden" name="status" value="served">
+                                                <button type="submit" name="update_status" class="btn btn-sm btn-info w-100">
+                                                    <i class="fas fa-utensils"></i> Mark Served
                                                 </button>
                                             </form>
                                         <?php endif; ?>
                                         
-                                        <button class="btn btn-outline-primary btn-sm" onclick="viewOrderDetails(<?= $row['id'] ?>)">
-                                            <i class="fas fa-eye"></i>
-                                        </button>
-                                        <button class="btn btn-outline-secondary btn-sm" onclick="printOrder(<?= $row['id'] ?>)">
-                                            <i class="fas fa-print"></i>
-                                        </button>
-                                        
-                                        <?php if (!$row['staff_name'] && in_array($row['status'], ['pending', 'preparing'])): ?>
-                                            <button class="btn btn-outline-info btn-sm" onclick="assignStaff(<?= $row['id'] ?>)">
-                                                <i class="fas fa-user-plus"></i> Assign
+                                        <?php if (!$row['waiter_name'] && $type === 'dine-in'): ?>
+                                            <button class="btn btn-sm btn-outline-secondary" onclick="assignWaiter(<?= $row['id'] ?>)">
+                                                <i class="fas fa-user-plus"></i>
                                             </button>
                                         <?php endif; ?>
+                                        
+                                        <button class="btn btn-sm btn-outline-info" onclick="viewOrderDetails(<?= $row['id'] ?>)">
+                                            <i class="fas fa-eye"></i>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary" onclick="printOrder(<?= $row['id'] ?>)">
+                                            <i class="fas fa-print"></i>
+                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -335,7 +325,7 @@ $staff_list = $conn->query("SELECT id, name FROM users WHERE role IN ('waiter', 
                         <div class="text-center py-5">
                             <i class="fas fa-clipboard-list fs-1 text-muted mb-3"></i>
                             <h5 class="text-muted">No orders found</h5>
-                            <p class="text-muted">Orders will appear here when customers place them.</p>
+                            <p class="text-muted">No <?= $type ?> orders match your current filters.</p>
                         </div>
                     </div>
                 <?php endif; ?>
@@ -344,30 +334,30 @@ $staff_list = $conn->query("SELECT id, name FROM users WHERE role IN ('waiter', 
     </div>
 </div>
 
-<!-- Assign Staff Modal -->
-<div class="modal fade" id="assignStaffModal" tabindex="-1">
+<!-- Assign Waiter Modal -->
+<div class="modal fade" id="assignWaiterModal" tabindex="-1">
     <div class="modal-dialog">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">Assign Staff Member</h5>
+                <h5 class="modal-title">Assign Waiter</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST">
                 <div class="modal-body">
-                    <input type="hidden" name="order_id" id="assignOrderId">
                     <div class="mb-3">
-                        <label class="form-label">Select Staff Member</label>
-                        <select name="staff_id" class="form-select" required>
-                            <option value="">Choose staff...</option>
-                            <?php while($staff = $staff_list->fetch_assoc()): ?>
-                                <option value="<?= $staff['id'] ?>"><?= htmlspecialchars($staff['name']) ?></option>
+                        <label class="form-label">Select Waiter</label>
+                        <select name="waiter_id" class="form-select" required>
+                            <option value="">Choose Waiter</option>
+                            <?php while($waiter = $waiters->fetch_assoc()): ?>
+                                <option value="<?= $waiter['id'] ?>"><?= htmlspecialchars($waiter['name']) ?></option>
                             <?php endwhile; ?>
                         </select>
+                        <input type="hidden" name="order_id" id="assignOrderId">
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="submit" name="assign_staff" class="btn btn-primary">Assign</button>
+                    <button type="submit" name="assign_waiter" class="btn btn-primary">Assign Waiter</button>
                 </div>
             </form>
         </div>
@@ -375,28 +365,19 @@ $staff_list = $conn->query("SELECT id, name FROM users WHERE role IN ('waiter', 
 </div>
 
 <script>
-let autoRefreshInterval;
-
-function filterByStatus(status) {
-    const url = new URL(window.location);
-    if (status === 'all') {
-        url.searchParams.delete('status');
-    } else {
-        url.searchParams.set('status', status);
-    }
-    window.location.href = url.toString();
-}
-
 function refreshOrders() {
-    window.location.reload();
+    const btn = document.getElementById('refreshBtn');
+    const icon = btn.querySelector('i');
+    icon.classList.add('fa-spin');
+    
+    setTimeout(() => {
+        location.reload();
+    }, 500);
 }
 
-function exportOrders() {
-    window.open('export_orders.php?type=<?= $type ?>', '_blank');
-}
-
-function printKitchenTickets() {
-    window.open('print_kitchen_tickets.php?type=<?= $type ?>', '_blank');
+function assignWaiter(orderId) {
+    document.getElementById('assignOrderId').value = orderId;
+    new bootstrap.Modal(document.getElementById('assignWaiterModal')).show();
 }
 
 function viewOrderDetails(orderId) {
@@ -407,54 +388,57 @@ function printOrder(orderId) {
     window.open('print_order.php?id=' + orderId, '_blank');
 }
 
-function assignStaff(orderId) {
-    document.getElementById('assignOrderId').value = orderId;
-    new bootstrap.Modal(document.getElementById('assignStaffModal')).show();
+function exportOrders() {
+    const params = new URLSearchParams(window.location.search);
+    window.location.href = 'export_orders.php?' + params.toString();
 }
 
-// Auto-refresh functionality
-function toggleAutoRefresh() {
-    const checkbox = document.getElementById('autoRefresh');
-    if (checkbox.checked) {
-        autoRefreshInterval = setInterval(refreshOrders, 30000); // Refresh every 30 seconds
-    } else {
-        clearInterval(autoRefreshInterval);
+// Auto-refresh every 30 seconds
+setInterval(function() {
+    if (document.visibilityState === 'visible') {
+        const container = document.getElementById('ordersContainer');
+        fetch(window.location.href + '&ajax=1')
+            .then(response => response.text())
+            .then(html => {
+                // Update only the orders container without full page reload
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                const newContainer = doc.getElementById('ordersContainer');
+                if (newContainer) {
+                    container.innerHTML = newContainer.innerHTML;
+                }
+            })
+            .catch(error => console.log('Auto-refresh failed:', error));
+    }
+}, 30000);
+
+// Sound notification for new orders (optional)
+let lastOrderCount = <?= $orders->num_rows ?>;
+function checkNewOrders() {
+    fetch('check_new_orders.php?type=<?= $type ?>')
+        .then(response => response.json())
+        .then(data => {
+            if (data.count > lastOrderCount) {
+                // Play notification sound (you can add audio element)
+                showNotification('New order received!');
+                lastOrderCount = data.count;
+            }
+        })
+        .catch(error => console.log('Check new orders failed:', error));
+}
+
+function showNotification(message) {
+    if (Notification.permission === 'granted') {
+        new Notification('RMS Order Update', {
+            body: message,
+            icon: '/assets/img/logo.png'
+        });
     }
 }
 
-// Update timers
-function updateTimers() {
-    document.querySelectorAll('.timer-minutes').forEach(timer => {
-        const currentMinutes = parseInt(timer.textContent);
-        timer.textContent = currentMinutes + 1;
-        
-        // Update priority colors based on time
-        const orderCard = timer.closest('.order-card');
-        orderCard.classList.remove('priority-low', 'priority-medium', 'priority-high');
-        
-        if (currentMinutes > 30) {
-            orderCard.classList.add('priority-high');
-        } else if (currentMinutes > 15) {
-            orderCard.classList.add('priority-medium');
-        } else {
-            orderCard.classList.add('priority-low');
-        }
-    });
-}
-
-// Initialize
-document.addEventListener('DOMContentLoaded', function() {
-    toggleAutoRefresh();
-    document.getElementById('autoRefresh').addEventListener('change', toggleAutoRefresh);
-    
-    // Update timers every minute
-    setInterval(updateTimers, 60000);
-});
-
-// Sound notification for new orders (optional)
-function playNotificationSound() {
-    const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+L2umkcBTGH0+/PfC8GM2+57+GVSA0PVqzn77BdGAg+ltryxnkpBSl+zPLaizsIGGS57OOYTgwOUarm9bhjHgU2jdXzzn0vBSF1xe/glEgODlOq5O+zYBoGPJPY88p9KwUme8rx3I4+CRZiturqpVITC0ml4/a2ZRsGNIzU8tGAMQYhccTv45ZFDBFYrObxu2EaBDuS2fPKfSsFJnnI8tyOOQkXZL3s5ZdPDAxPqOX0t2MeBDON1vTOgC4GM2+675+Sag0PVKzl87ZjHAU4k9n1unEiBC13yO/eizEKH2q+6OWYTgwKVKjj7blmGgM1jdTy0H4wBiFxxPDak0IND1as5O2yXxkJPpPX88p9LAUmecnw34xQQwAAAPA'); // Simple beep sound
-    audio.play().catch(() => {}); // Ignore errors if audio can't play
+// Request notification permission
+if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
 }
 </script>
 

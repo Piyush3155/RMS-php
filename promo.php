@@ -14,19 +14,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $max_uses = $_POST['max_uses'];
         $min_order_value = $_POST['min_order_value'];
         $description = $_POST['description'];
-        
+
         $stmt = $conn->prepare("INSERT INTO promo_codes (code, type, value, valid_from, valid_to, max_uses, min_order_value, description, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')");
-        $stmt->bind_param("ssdssids", $code, $type, $value, $valid_from, $valid_to, $max_uses, $min_order_value, $description);
-        $stmt->execute();
+        if ($stmt) {
+            $stmt->bind_param("ssdssids", $code, $type, $value, $valid_from, $valid_to, $max_uses, $min_order_value, $description);
+            $stmt->execute();
+            $stmt->close();
+        } else {
+            // Optionally log or display error: $conn->error
+        }
     }
-    
+
     if (isset($_POST['toggle_status'])) {
         $id = $_POST['promo_id'];
         $new_status = $_POST['new_status'];
-        
+
         $stmt = $conn->prepare("UPDATE promo_codes SET status = ? WHERE id = ?");
-        $stmt->bind_param("si", $new_status, $id);
-        $stmt->execute();
+        if ($stmt) {
+            $stmt->bind_param("si", $new_status, $id);
+            $stmt->execute();
+            $stmt->close();
+        } else {
+            // Optionally log or display error: $conn->error
+        }
     }
 }
 
@@ -60,22 +70,32 @@ if (!empty($where_conditions)) {
 $promo_query = "SELECT * FROM promo_codes $where_clause ORDER BY created_at DESC";
 if (!empty($params)) {
     $stmt = $conn->prepare($promo_query);
-    $stmt->bind_param($param_types, ...$params);
-    $stmt->execute();
-    $promo = $stmt->get_result();
+    if ($stmt) {
+        $stmt->bind_param($param_types, ...$params);
+        $stmt->execute();
+        $promo = $stmt->get_result();
+    } else {
+        $promo = false;
+    }
 } else {
     $promo = $conn->query($promo_query);
 }
 
 // Get statistics
-$stats = $conn->query("
+$stats_result = $conn->query("
     SELECT 
         COUNT(*) as total_promos,
         COUNT(CASE WHEN status = 'active' THEN 1 END) as active_promos,
         COUNT(CASE WHEN status = 'expired' THEN 1 END) as expired_promos,
         COUNT(CASE WHEN status = 'disabled' THEN 1 END) as disabled_promos
     FROM promo_codes $where_clause
-")->fetch_assoc();
+");
+$stats = $stats_result ? $stats_result->fetch_assoc() : [
+    'total_promos' => 0,
+    'active_promos' => 0,
+    'expired_promos' => 0,
+    'disabled_promos' => 0
+];
 ?>
 
 <style>
@@ -179,7 +199,7 @@ $stats = $conn->query("
 
             <!-- Promo Codes Grid -->
             <div class="row">
-                <?php if ($promo->num_rows > 0): ?>
+                <?php if ($promo && $promo->num_rows > 0): ?>
                     <?php while($row = $promo->fetch_assoc()): ?>
                         <div class="col-lg-6 col-xl-4">
                             <div class="promo-card">

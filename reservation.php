@@ -47,12 +47,16 @@ $where_clause = 'WHERE ' . implode(' AND ', $where_conditions);
 
 $reservations_query = "SELECT * FROM reservations $where_clause ORDER BY reservation_time ASC";
 $stmt = $conn->prepare($reservations_query);
-$stmt->bind_param($param_types, ...$params);
-$stmt->execute();
-$reservations = $stmt->get_result();
+if ($stmt) {
+    $stmt->bind_param($param_types, ...$params);
+    $stmt->execute();
+    $reservations = $stmt->get_result();
+} else {
+    $reservations = false;
+}
 
 // Get statistics
-$stats = $conn->query("
+$stats_result = $conn->query("
     SELECT 
         COUNT(*) as total_reservations,
         SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) as confirmed,
@@ -61,7 +65,14 @@ $stats = $conn->query("
         SUM(party_size) as total_guests
     FROM reservations 
     WHERE DATE(reservation_time) = '$date_filter'
-")->fetch_assoc();
+");
+$stats = $stats_result ? $stats_result->fetch_assoc() : [
+    'total_reservations' => 0,
+    'confirmed' => 0,
+    'completed' => 0,
+    'cancelled' => 0,
+    'total_guests' => 0
+];
 ?>
 
 <style>
@@ -167,7 +178,7 @@ $stats = $conn->query("
 
             <!-- Reservations List -->
             <div class="row">
-                <?php if ($reservations->num_rows > 0): ?>
+                <?php if ($reservations && $reservations->num_rows > 0): ?>
                     <?php while($row = $reservations->fetch_assoc()): ?>
                         <div class="col-lg-6 col-xl-4">
                             <div class="reservation-card status-<?= $row['status'] ?>">
@@ -175,10 +186,10 @@ $stats = $conn->query("
                                     <div class="d-flex justify-content-between align-items-start mb-2">
                                         <div>
                                             <h6 class="fw-bold mb-1">
-                                                <i class="fas fa-user me-1"></i><?= htmlspecialchars($row['customer_name']) ?>
+                                                <i class="fas fa-user me-1"></i><?= htmlspecialchars($row['customer_name'] ?? '') ?>
                                             </h6>
                                             <div class="text-muted small">
-                                                <i class="fas fa-phone me-1"></i><?= htmlspecialchars($row['customer_phone']) ?>
+                                                <i class="fas fa-phone me-1"></i><?= htmlspecialchars($row['customer_phone'] ?? '') ?>
                                             </div>
                                         </div>
                                         <span class="badge bg-<?= $row['status'] === 'confirmed' ? 'success' : ($row['status'] === 'completed' ? 'primary' : 'danger') ?>">
@@ -189,12 +200,12 @@ $stats = $conn->query("
                                     <div class="row g-2 mb-2">
                                         <div class="col-6">
                                             <div class="table-badge text-center">
-                                                <i class="fas fa-table me-1"></i>Table <?= $row['table_no'] ?>
+                                                <i class="fas fa-table me-1"></i>Table <?= $row['table_no'] ?? '' ?>
                                             </div>
                                         </div>
                                         <div class="col-6">
                                             <div class="party-size text-center">
-                                                <i class="fas fa-users me-1"></i><?= $row['party_size'] ?> Guests
+                                                <i class="fas fa-users me-1"></i><?= $row['party_size'] ?? '' ?> Guests
                                             </div>
                                         </div>
                                     </div>
@@ -202,11 +213,11 @@ $stats = $conn->query("
                                     <div class="text-center mb-3">
                                         <div class="time-slot">
                                             <i class="fas fa-clock me-1"></i>
-                                            <?= date('M d, Y - g:i A', strtotime($row['reservation_time'])) ?>
+                                            <?= isset($row['reservation_time']) ? date('M d, Y - g:i A', strtotime($row['reservation_time'])) : '' ?>
                                         </div>
                                     </div>
                                     
-                                    <?php if ($row['special_requests']): ?>
+                                    <?php if (!empty($row['special_requests'])): ?>
                                         <div class="special-request">
                                             <i class="fas fa-sticky-note me-2"></i>
                                             <strong>Special Requests:</strong><br>
